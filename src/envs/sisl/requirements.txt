@@ -1,0 +1,5 @@
+ray
+protobuf==3.20.0
+gymnasium
+dm_tree
+Box2D
