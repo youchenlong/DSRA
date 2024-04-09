@@ -20,7 +20,7 @@ class DSRMAC:
     def select_actions(self, ep_batch, t_ep, t_env, bs=slice(None), test_mode=False):
         # Only select actions for the selected batch elements in bs
         avail_actions = ep_batch["avail_actions"][:, t_ep]
-        agent_outputs, _ = self.forward(ep_batch, ep_batch, t_ep, test_mode=test_mode)
+        agent_outputs, _, _, _, _, _ = self.forward(ep_batch, ep_batch, t_ep, test_mode=test_mode)
         chosen_actions = self.action_selector.select_action(agent_outputs[bs], avail_actions[bs], t_env, test_mode=test_mode)
         return chosen_actions
 
@@ -29,7 +29,8 @@ class DSRMAC:
 
         agent_inputs = self._build_inputs(ep_batch, t)
         avail_actions = ep_batch["avail_actions"][:, t]
-        agent_outs, self.hidden_states, self.hidden_states_ability, loss = self.agent.forward(agent_inputs, states, self.hidden_states, self.hidden_states_ability, train_mode=train_mode)
+        # agent_outs, self.hidden_states, self.hidden_states_ability, loss = self.agent.forward(agent_inputs, states, self.hidden_states, self.hidden_states_ability, train_mode=train_mode)
+        agent_outs, self.hidden_states, self.hidden_states_ability, latent_embed, subtask_latent_embed, subtask_prob_logit, _inputs = self.agent.forward(agent_inputs, states, self.hidden_states, self.hidden_states_ability, train_mode=train_mode)
 
         # Softmax the agent outputs if they're policy logits
         if self.agent_output_type == "pi_logits":
@@ -54,7 +55,7 @@ class DSRMAC:
                     # Zero out the unavailable actions
                     agent_outs[reshaped_avail_actions == 0] = 0.0
 
-        return agent_outs.view(ep_batch.batch_size, self.n_agents, -1), loss
+        return agent_outs.view(ep_batch.batch_size, self.n_agents, -1), latent_embed, subtask_latent_embed, subtask_prob_logit, agent_inputs.view(ep_batch.batch_size, self.n_agents, -1), _inputs
 
     def init_hidden(self, batch_size):
         self.hidden_states = self.agent.init_hidden()[0].unsqueeze(0).expand(batch_size, self.n_agents, -1)

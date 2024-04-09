@@ -69,7 +69,7 @@ class DSRAgent(nn.Module):
         self.fc1_ability = nn.Linear(input_shape, args.rnn_hidden_dim)
         self.rnn_ability = nn.GRUCell(args.rnn_hidden_dim, args.rnn_hidden_dim)
         self.fc2_ability = nn.Linear(args.rnn_hidden_dim, args.latent_dim) 
-        self.atten = MultiHeadAttention(args.num_heads, self.n_subtasks, args.softTemperature, args.latent_dim, args.latent_dim, args.latent_dim, verbose=True, isSoftmax=args.isSoftmax)
+        # self.atten = MultiHeadAttention(args.num_heads, self.n_subtasks, args.softTemperature, args.latent_dim, args.latent_dim, args.latent_dim, verbose=True, isSoftmax=args.isSoftmax)
 
         NN_HIDDEN_SIZE = args.NN_HIDDEN_SIZE
         self.embed_net = nn.Sequential(nn.Linear(input_shape, NN_HIDDEN_SIZE),
@@ -142,6 +142,11 @@ class DSRAgent(nn.Module):
             elif self.args.sft_way == "gumbel_softmax":
                 subtask_prob = F.gumbel_softmax(subtask_prob_logit, hard=True, dim=-1) # [bs, n_agent, n_subtask]
         subtask_prob = subtask_prob.reshape(-1, 1, self.n_subtasks) # [bs*n_agent, 1, n_subtask]
+        if train_mode:
+            _inputs = self.decoder(subtask_latent_embed) # [bs*n_agent*n_subtask, input_shape]
+            _inputs = th.matmul(subtask_prob, _inputs.reshape(-1, self.n_subtasks, self.input_shape)).reshape(-1, self.input_shape) # [bs*n_agent, input_shape]
+        else:
+            _inputs = inputs.clone()
         if self.args.ablation_selection:
             subtask_prob = th.rand(self.bs, self.n_agents, self.n_subtasks) # [bs, n_agent, n_subtask]
             subtask_prob = F.softmax(subtask_prob, dim=-1) # [bs, n_agent, n_subtask]
@@ -161,41 +166,4 @@ class DSRAgent(nn.Module):
         q = q.reshape(-1, self.n_subtasks, self.args.n_actions) # [bs*n_agent, n_subtask, n_action]
         q = th.bmm(subtask_prob, q).squeeze(1) # [bs*n_agent, n_action]
 
-        # regularizer
-        sim_loss = th.tensor(0.0).to(self.args.device)
-        recon_loss = th.tensor(0.0).to(self.args.device)
-        consensus_loss = th.tensor(0.0).to(self.args.device)
-        sel_loss = th.tensor(0.0).to(self.args.device)
-        reg_loss = th.tensor(0.0).to(self.args.device)
-        if train_mode:
-            # similarity loss
-            standard_n_dist = D.Normal(th.zeros_like(latent_embed[:, :self.n_subtasks * self.latent_dim]), 
-                                       th.ones_like(latent_embed[:, self.n_subtasks * self.latent_dim:]))
-            sim_loss += kl_divergence(gaussian_embed, standard_n_dist).sum(-1).mean()
-            sim_loss *= self.args.vae_beta
-
-            # reconstruction loss
-            subtask_latent_embed = subtask_latent_embed.reshape(-1, self.latent_dim) # [bs*n_agent*n_subtask, latent_dim]
-            _inputs = self.decoder(subtask_latent_embed) # [bs*n_agent*n_subtask, input_shape]
-            _inputs = th.matmul(subtask_prob, _inputs.reshape(-1, self.n_subtasks, self.input_shape)).reshape(-1, self.input_shape) # [bs*n_agent, input_shape]
-            recon_loss += F.mse_loss(_inputs, inputs)
-
-            # consensus loss
-            subtask_latent_embed = F.normalize(subtask_latent_embed.reshape(-1, self.n_agents, self.n_subtasks*self.latent_dim), dim=-1) # [bs, n_agent, n_subtask*latent_dim]
-            subtask_latent_embed1 = subtask_latent_embed.unsqueeze(2) # [bs, n_agent, 1, n_subtask*latent_dim]
-            subtask_latent_embed2 = subtask_latent_embed.unsqueeze(1).clone().detach() # [bs, 1, n_agent, n_subtask*latent_dim]
-            subtask_latent_dist = ((subtask_latent_embed1 - subtask_latent_embed2)**2).sum(dim=3, keepdim=True) # [bs, n_agent, n_agent, 1]
-            consensus_loss = subtask_latent_dist.sum() / (self.n_agents*(self.n_agents-1))
-
-            # subtask selection loss
-            subtask_prob_logit = subtask_prob_logit.reshape(-1, self.n_subtasks) # [bs*n_agent, n_subtask]
-            subtask_prob_logit = th.clamp(subtask_prob_logit, 1e-4)
-            sel_loss = -(subtask_prob_logit*th.log2(subtask_prob_logit)).sum(-1).mean()
-        sim_loss *= self.args.sim_loss_weight
-        recon_loss *= self.args.recon_loss_weight
-        # state_loss *= self.args.state_loss_weight
-        consensus_loss *= self.args.consensus_loss_weight
-        sel_loss *= self.args.sel_loss_weight
-        reg_loss = recon_loss + sim_loss + consensus_loss + sel_loss
-
-        return q, h, h_ability, {"reg_loss": reg_loss, "sim_loss": sim_loss, "recon_loss": recon_loss, "consensus_loss": consensus_loss, "sel_loss": sel_loss}
+        return q, h, h_ability, latent_embed.view(-1, self.n_agents, self.n_subtasks * self.latent_dim * 2), subtask_latent_embed.view(-1, self.n_agents, self.n_subtasks * self.latent_dim), subtask_prob_logit.view(-1, self.n_agents, self.n_subtasks), _inputs.view(-1, self.n_agents, self.input_shape)

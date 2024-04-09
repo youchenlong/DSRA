@@ -38,15 +38,14 @@ rnn_hidden_dim_subtask_: 32
 # rnn_hidden_dim_subtask_: 6
 sft_way: "gumbel_softmax" #softmax or gumbel_softmax
 
-num_heads: 1
-attn_dim: 16
-softTemperature: 1
-isSoftmax: False
+# num_heads: 1
+# attn_dim: 16
+# softTemperature: 1
+# isSoftmax: False
 
 vae_beta: 1
 recon_loss_weight: 0.001
-sim_loss_weight: 0
-# state_loss_weight: 0.001
+sim_loss_weight: 0.001
 consensus_loss_weight: 0.001
 sel_loss_weight: 0.001
 

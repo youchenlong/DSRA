@@ -6,6 +6,8 @@ from modules.mixers.qmix_hidden import QMixerHidden
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributions as D
+from torch.distributions import kl_divergence
 from torch.optim import RMSprop
 import numpy as np
 
@@ -51,48 +53,36 @@ class LatentQLearner:
 
         # Calculate estimated Q-Values
         mac_out = []
+        latent_embeds = []
+        subtask_latent_embeds = []
+        subtask_prob_logits = []
+        subtask_prob_logits_last = []
+        inputs = []
+        _inputs = []
         self.mac.init_hidden(batch.batch_size)
         self.mac.init_latent(batch.batch_size)
 
-        reg_loss = 0
-        recon_loss = 0
-        sim_loss = 0
-        consensus_loss = 0
-        sel_loss = 0
-        reg_flag = False
-        recon_flag = False
-        sim_flag = False
-        consensus_flag = False
-        sel_flag = False
         for t in range(batch.max_seq_length):
             states = batch["state"][:, t, :] # [bs, state_dim]
-            agent_outs, loss = self.mac.forward(batch, states, t=t, train_mode=True)
-
-            if loss["reg_loss"] is not None:
-                reg_loss += loss["reg_loss"]
-                reg_flag = True
-            if loss["sim_loss"] is not None:
-                sim_loss += loss["sim_loss"]
-                sim_flag = True
-            if loss["recon_loss"] is not None:
-                recon_loss += loss["recon_loss"]
-                recon_flag = True
-            if loss["consensus_loss"] is not None:
-                consensus_loss += loss["consensus_loss"]
-                consensus_flag = True
-            if loss["sel_loss"] is not None:
-                sel_loss += loss["sel_loss"]
-                sel_flag = True
-            
+            agent_outs, latent_embed, subtask_latent_embed, subtask_prob_logit, input, _input = self.mac.forward(batch, states, t=t, train_mode=True)
             mac_out.append(agent_outs)
-
-        reg_loss /= batch.max_seq_length
-        recon_loss /= batch.max_seq_length
-        sim_loss /= batch.max_seq_length
-        consensus_loss /= batch.max_seq_length
-        sel_loss /= batch.max_seq_length
-
-        mac_out = th.stack(mac_out, dim=1)  # Concat over time
+            if t > 0:
+                subtask_prob_logits.append(subtask_prob_logit)
+            if t < batch.max_seq_length - 1:
+                subtask_prob_logits_last.append(subtask_prob_logit)
+                latent_embeds.append(latent_embed)
+                subtask_latent_embeds.append(subtask_latent_embed)
+                inputs.append(input)
+                _inputs.append(_input)
+        
+        mac_out = th.stack(mac_out, dim=1) # [bs, eplen+1, n_agents, n_actions]
+        subtask_prob_logits = th.stack(subtask_prob_logits, dim=1) # [bs, eplen, n_agents, n_subtasks]
+        subtask_prob_logits_last = th.stack(subtask_prob_logits_last, dim=1) # [bs, eplen, n_agents, n_subtasks]
+        latent_embeds = th.stack(latent_embeds, dim=1) # [bs, eplen, n_agents, n_subtasks * latent_dim * 2]
+        subtask_latent_embeds = th.stack(subtask_latent_embeds, dim=1) # [bs, eplen, n_agents, n_subtasks * latent_dim]
+        inputs = th.stack(inputs, dim=1) # [bs, eplen, n_agents, input_shape]
+        _inputs = th.stack(_inputs, dim=1) # [bs, eplen, n_agents, input_shape]
+        input_shape = inputs.size()[-1]
 
         # Pick the Q-Values for the actions taken by each agent
         chosen_action_qvals = th.gather(mac_out[:, :-1], dim=3, index=actions).squeeze(3)  # Remove the last dim
@@ -102,7 +92,7 @@ class LatentQLearner:
         self.target_mac.init_hidden(batch.batch_size)
         self.target_mac.init_latent(batch.batch_size)  # (bs,n,latent_size)
         for t in range(batch.max_seq_length):
-            target_agent_outs, _ = self.target_mac.forward(batch, batch, t=t)
+            target_agent_outs, _, _, _, _, _ = self.target_mac.forward(batch, batch, t=t)
             target_mac_out.append(target_agent_outs)
 
         # We don't need the first timesteps Q-Value estimate for calculating targets
@@ -139,6 +129,50 @@ class LatentQLearner:
 
         # Normal L2 loss, take mean over actual data
         td_loss = (masked_td_error ** 2).sum() / mask.sum()
+
+        # regularizer
+        sim_loss = th.tensor(0.0).to(self.args.device)
+        recon_loss = th.tensor(0.0).to(self.args.device)
+        consensus_loss = th.tensor(0.0).to(self.args.device)
+        sel_loss = th.tensor(0.0).to(self.args.device)
+        reg_loss = th.tensor(0.0).to(self.args.device)
+        # similarity loss
+        # latent_embeds = latent_embeds.reshape(-1, self.args.n_subtasks * self.args.latent_dim * 2) # [bs*eplen*n_agents, n_subtasks*latent_dim*2]
+        # gaussian_embed = D.Normal(latent_embeds[:, :self.args.n_subtasks * self.args.latent_dim],
+        #                             (latent_embeds[:, self.args.n_subtasks * self.args.latent_dim:]) ** (1 / 2))
+        # standard_n_dist = D.Normal(th.zeros_like(latent_embeds[:, :self.args.n_subtasks * self.args.latent_dim]), 
+        #                             th.ones_like(latent_embeds[:, self.args.n_subtasks * self.args.latent_dim:]))
+        # sim_loss += kl_divergence(gaussian_embed, standard_n_dist).sum(-1).mean()
+        sim_loss *= self.args.vae_beta
+
+        # reconstruction loss
+        _mask = mask.unsqueeze(-1).expand_as(inputs).clone() # [bs, eplen, n_agents, input_shape]
+        inputs = (inputs * _mask).reshape(-1, input_shape) # [bs*eplen*n_agents, input_shape]
+        _inputs = (_inputs * _mask).reshape(-1, input_shape) # [bs*eplen*n_agents, input_shape]
+        recon_loss += F.mse_loss(_inputs, inputs)
+
+        # consensus loss
+        subtask_latent_embeds = F.normalize(subtask_latent_embeds.reshape(batch.batch_size, -1, self.args.n_agents, self.args.n_subtasks * self.args.latent_dim), dim=-1) # [bs, eplen, n_agents, n_subtasks*latent_dim]
+        subtask_latent_embeds1 = subtask_latent_embeds.unsqueeze(3) # [bs, eplen, n_agents, 1, n_subtasks*latent_dim]
+        subtask_latent_embeds2 = subtask_latent_embeds.unsqueeze(2).clone().detach() # [bs, eplen, 1, n_agents, n_subtasks*latent_dim]
+        subtask_latent_dist = ((subtask_latent_embeds1 - subtask_latent_embeds2)**2).sum(dim=4, keepdim=True) # [bs, eplen, n_agents, n_agents, 1]
+        _mask = mask.unsqueeze(-1).unsqueeze(-1).expand_as(subtask_latent_dist).clone() # [bs, eplen, n_agents, n_agents, 1]
+        subtask_latent_dist = subtask_latent_dist * _mask
+        consensus_loss += subtask_latent_dist.sum() / _mask.sum()
+
+        # subtask selection loss
+        subtask_probs = F.softmax(subtask_prob_logits, dim=-1) # [bs, eplen, n_agents, n_subtasks]
+        subtask_probs_last = F.softmax(subtask_prob_logits_last, dim=-1) # [bs, eplen, n_agents, n_subtasks]
+        subtask_prob_kl = th.sum(subtask_probs_last.detach() * (-th.log(subtask_probs + 1e-8)), dim=[3, 2]).unsqueeze(-1) / self.args.n_agents # [bs, eplen, 1]
+        _mask = mask[:, 1:].clone() # [bs, eplen-1, 1]
+        _mask = th.cat([_mask, th.zeros(batch.batch_size, 1, 1, device=self.args.device)], dim=1) # [bs, eplen, 1]
+        sel_loss += subtask_prob_kl.sum() / _mask.sum()
+
+        sim_loss *= self.args.sim_loss_weight
+        recon_loss *= self.args.recon_loss_weight
+        consensus_loss *= self.args.consensus_loss_weight
+        sel_loss *= self.args.sel_loss_weight
+        reg_loss = recon_loss + sim_loss + consensus_loss + sel_loss
         
         loss = td_loss + reg_loss
 
@@ -154,22 +188,16 @@ class LatentQLearner:
 
         if t_env - self.log_stats_t >= self.args.learner_log_interval:
             self.logger.log_stat("loss", loss.item(), t_env)
-            if reg_flag:
-                self.logger.log_stat("reg_loss", reg_loss.item(), t_env)
-            if recon_flag:
-                self.logger.log_stat("recon_loss", recon_loss.item(), t_env)
-            if sim_flag:
-                self.logger.log_stat("sim_loss", sim_loss.item(), t_env)
-            if consensus_flag:
-                self.logger.log_stat("consensus_loss", consensus_loss.item(), t_env)
-            if sel_flag:
-                self.logger.log_stat("sel_loss", sel_loss.item(), t_env)
+            self.logger.log_stat("reg_loss", reg_loss.item(), t_env)
+            self.logger.log_stat("recon_loss", recon_loss.item(), t_env)
+            self.logger.log_stat("sim_loss", sim_loss.item(), t_env)
+            self.logger.log_stat("consensus_loss", consensus_loss.item(), t_env)
+            self.logger.log_stat("sel_loss", sel_loss.item(), t_env)
             self.logger.log_stat("grad_norm", grad_norm, t_env)
             mask_elems = mask.sum().item()
             self.logger.log_stat("td_error_abs", (masked_td_error.abs().sum().item()/mask_elems), t_env)
             self.logger.log_stat("q_taken_mean", (chosen_action_qvals * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
             self.logger.log_stat("target_mean", (targets * mask).sum().item()/(mask_elems * self.args.n_agents), t_env)
-            
             
             self.log_stats_t = t_env
 
