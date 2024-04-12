@@ -35,7 +35,7 @@ The requirements.txt file can be used to install the necessary packages into a v
 ## Run an experiment 
 
 ```shell
-python src/main.py --config=dsr --env-config=sc2 with env_args.map_name=2c_vs_64zg
+python src/main.py --config=dsr --env-config=sc2 with env_args.map_name=MMM2 buffer_size=5000 batch_size=32 t_max=2050000 n_subtasks=3 
 ```
 ```shell
 python src/main.py --config=dsr --env-config=overcooked
@@ -66,6 +66,11 @@ All results will be stored in the `Results` folder.
 The previous config files used for the SMAC Beta have the suffix `_beta`.
 
 ## Saving and loading learnt models
+
+### Visualization
+```shell
+python src/main.py --config=dsr --env-config=sc2 with env_args.map_name=MMM2 n_subtasks=3 evaluate=True render=True save_replay=False test_nepisode=1 checkpoint_path="C:\Users\admin\Desktop\任务分解\results\models\dsr_MMM2"
+```
 
 ### Saving models
 
