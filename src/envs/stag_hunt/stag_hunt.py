@@ -5,7 +5,7 @@ import numpy as np
 import random
 import pygame
 from utils.dict2namedtuple import convert
-from gym.envs.classic_control import rendering
+# from gym.envs.classic_control import rendering
 import os
 
 '''
