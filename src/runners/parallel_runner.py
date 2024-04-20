@@ -216,7 +216,7 @@ def env_worker(remote, env_fn):
     while True:
         cmd, data = remote.recv()
         if cmd == "step":
-            actions = data
+            actions = th.Tensor(data)
             # Take a step in the environment
             reward, terminated, env_info = env.step(actions)
             # Return the observations, avail_actions and state to make the next action

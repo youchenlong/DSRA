@@ -79,7 +79,6 @@ class ForagingEnv(MultiAgentEnv):
             plt.imshow(data)
             plt.axis('off')
             fig.savefig(os.path.join(self.render_path, f'image_step_{self._total_steps}.png'), bbox_inches='tight', dpi=600)
-        
         self.obs, rewards, dones, info = self.env.step(actions.cpu().numpy())
 
         self.agent_score += rewards
