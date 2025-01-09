@@ -1,5 +1,5 @@
 /3rdparty
 /docker
 /results
-*/__pycache__
-*.sh
+**/__pycache__
+**/*.sh
