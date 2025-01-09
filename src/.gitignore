@@ -1,2 +1,5 @@
-tb_logs/
-results/
+/3rdparty
+/docker
+/results
+**/__pycache__
+**/*.sh
