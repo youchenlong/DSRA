@@ -14,6 +14,6 @@ env_args:
 learner_log_interval: 10000
 log_interval: 10000
 runner_log_interval: 10000
-t_max: 2050000
+t_max: 4050000
 test_interval: 10000
 test_nepisode: 32
